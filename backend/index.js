@@ -1,0 +1,523 @@
+// Standalone Node + Express + Socket.io Server for CABO
+const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
+const cors = require('cors');
+const path = require('path');
+const dotenv = require('dotenv');
+
+// Load environment variables
+dotenv.config();
+
+const port = process.env.PORT || 3001;
+const corsOrigin = process.env.CORS_ORIGIN || 'http://localhost:3000';
+
+const expressApp = express();
+
+// Middlewares
+expressApp.use(cors({ origin: corsOrigin }));
+expressApp.use(express.json());
+
+// Health check endpoint
+expressApp.get('/health', (req, res) => {
+  res.status(200).send('CABO Backend is healthy and running.');
+});
+
+const server = http.createServer(expressApp);
+
+// Initialize Socket.io with CORS
+const io = new Server(server, {
+  cors: {
+    origin: corsOrigin,
+    methods: ['GET', 'POST']
+  }
+});
+
+// Import game logic
+const gameEngine = require('./lib/game');
+
+// Import DB helper
+const db = require('./lib/db');
+
+// In-memory active rooms store
+// Map<roomCode, RoomState>
+const rooms = new Map();
+
+// Map<socket.id, { roomCode, playerId }> to quickly clean up on disconnect
+const socketToPlayerMap = new Map();
+
+// Helper to generate room codes
+function generateRoomCode() {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  let code = '';
+  for (let i = 0; i < 4; i++) {
+    code += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return code;
+}
+
+// Socket.io Game Events
+io.on('connection', (socket) => {
+  console.log(`Socket connected: ${socket.id}`);
+
+  // Create Room
+  socket.on('create_room', ({ playerName, playerId }) => {
+    let code;
+    let retries = 0;
+    do {
+      code = generateRoomCode();
+      retries++;
+    } while (rooms.has(code) && retries < 10);
+
+    const lobbyState = {
+      roomCode: code,
+      status: 'lobby',
+      players: [{
+        id: socket.id,
+        playerId,
+        name: playerName,
+        isHost: true,
+        active: true,
+        score: 0,
+        roundScore: 0,
+        peeked: false,
+        cards: []
+      }],
+      deck: [],
+      discardPile: [],
+      turnIndex: 0,
+      caboPlayerId: null,
+      turnsLeft: null,
+      activeDrawnCard: null,
+      roundNumber: 0
+    };
+
+    rooms.set(code, lobbyState);
+    socketToPlayerMap.set(socket.id, { roomCode: code, playerId });
+
+    socket.join(code);
+    socket.emit('room_joined', { roomCode: code, players: lobbyState.players, isHost: true });
+    console.log(`Room created: ${code} by player: ${playerName}`);
+  });
+
+  // Join Room
+  socket.on('join_room', ({ roomCode, playerName, playerId }) => {
+    const code = roomCode.toUpperCase();
+    if (!rooms.has(code)) {
+      socket.emit('error_message', 'Room not found.');
+      return;
+    }
+
+    const room = rooms.get(code);
+
+    // Check if player is already in this room (reconnection)
+    const existingPlayerIdx = room.players.findIndex(p => p.playerId === playerId);
+
+    if (existingPlayerIdx !== -1) {
+      // Reconnect player
+      const player = room.players[existingPlayerIdx];
+      player.id = socket.id;
+      player.active = true;
+
+      socketToPlayerMap.set(socket.id, { roomCode: code, playerId });
+      socket.join(code);
+
+      socket.emit('room_joined', { 
+        roomCode: code, 
+        players: room.players, 
+        isHost: player.isHost,
+        gameState: room.status !== 'lobby' ? room : null
+      });
+
+      // Broadcast updated room state to other players
+      io.to(code).emit('room_updated', room.players);
+      
+      if (room.status !== 'lobby') {
+        // Send full game state to the reconnected player
+        socket.emit('game_state_updated', sanitizeGameState(room, socket.id));
+        io.to(code).emit('log_message', `${player.name} reconnected.`);
+      }
+      console.log(`Player reconnected: ${player.name} in Room ${code}`);
+      return;
+    }
+
+    // If game is already in progress, prevent new players from joining
+    if (room.status !== 'lobby') {
+      socket.emit('error_message', 'Game already in progress.');
+      return;
+    }
+
+    // Check player limit
+    if (room.players.length >= 6) {
+      socket.emit('error_message', 'Room is full (max 6 players).');
+      return;
+    }
+
+    // Add new player to lobby
+    const newPlayer = {
+      id: socket.id,
+      playerId,
+      name: playerName,
+      isHost: false,
+      active: true,
+      score: 0,
+      roundScore: 0,
+      peeked: false,
+      cards: []
+    };
+
+    room.players.push(newPlayer);
+    socketToPlayerMap.set(socket.id, { roomCode: code, playerId });
+
+    socket.join(code);
+    socket.emit('room_joined', { roomCode: code, players: room.players, isHost: false });
+    
+    // Notify other players
+    io.to(code).emit('room_updated', room.players);
+    console.log(`Player ${playerName} joined Room ${code}`);
+  });
+
+  // Start Game
+  socket.on('start_game', ({ roomCode }) => {
+    const code = roomCode.toUpperCase();
+    if (!rooms.has(code)) return;
+    const room = rooms.get(code);
+
+    // Verify socket is the host
+    const player = room.players.find(p => p.id === socket.id);
+    if (!player || !player.isHost) {
+      socket.emit('error_message', 'Only the host can start the game.');
+      return;
+    }
+
+    if (room.players.length < 2) {
+      socket.emit('error_message', 'Need at least 2 players to start.');
+      return;
+    }
+
+    // Initialize game state using engine
+    const initialGameState = gameEngine.initRoomState(code, room.players);
+    rooms.set(code, initialGameState);
+
+    // Broadcast game started to everyone in room
+    sendGameStateToAll(code, initialGameState);
+    console.log(`Game started in Room ${code}`);
+  });
+
+  // Draw from Deck
+  socket.on('draw_deck', ({ roomCode }) => {
+    const code = roomCode.toUpperCase();
+    if (!rooms.has(code)) return;
+    const room = rooms.get(code);
+
+    gameEngine.drawCardFromDeck(room, socket.id);
+    sendGameStateToAll(code, room);
+  });
+
+  // Draw from Discard
+  socket.on('draw_discard', ({ roomCode }) => {
+    const code = roomCode.toUpperCase();
+    if (!rooms.has(code)) return;
+    const room = rooms.get(code);
+
+    gameEngine.drawCardFromDiscard(room, socket.id);
+    sendGameStateToAll(code, room);
+  });
+
+  // Discard Drawn Card
+  socket.on('discard_drawn', ({ roomCode, triggerAction }) => {
+    const code = roomCode.toUpperCase();
+    if (!rooms.has(code)) return;
+    const room = rooms.get(code);
+
+    gameEngine.discardDrawnCard(room, socket.id, triggerAction);
+    sendGameStateToAll(code, room);
+  });
+
+  // Replace hand cards (single or multi-match)
+  socket.on('replace_card', ({ roomCode, handIndices }) => {
+    const code = roomCode.toUpperCase();
+    if (!rooms.has(code)) return;
+    const room = rooms.get(code);
+
+    gameEngine.replaceHandCard(room, socket.id, handIndices);
+    sendGameStateToAll(code, room);
+  });
+
+  // Overload Card out-of-turn
+  socket.on('overload_card', ({ roomCode, targetPlayerId, cardIndex }, callback) => {
+    const code = roomCode.toUpperCase();
+    if (!rooms.has(code)) {
+      if (callback) callback({ success: false, error: 'Room not found' });
+      return;
+    }
+    const room = rooms.get(code);
+
+    const result = gameEngine.overloadCard(room, socket.id, targetPlayerId, cardIndex);
+    
+    // If mismatch or already matched (false overload), set temporary exposure timer
+    if (!result.success && result.revealPlayerId !== undefined) {
+      room.exposedCard = {
+        playerId: result.revealPlayerId,
+        cardIndex: result.revealIndex
+      };
+      
+      // Set 4-second timeout to turn it back face-down
+      setTimeout(() => {
+        const currentRoom = rooms.get(code);
+        if (currentRoom && currentRoom.exposedCard && 
+            currentRoom.exposedCard.playerId === result.revealPlayerId && 
+            currentRoom.exposedCard.cardIndex === result.revealIndex) {
+          currentRoom.exposedCard = null;
+          sendGameStateToAll(code, currentRoom);
+        }
+      }, 4000);
+    }
+
+    sendGameStateToAll(code, room);
+
+    if (callback) {
+      callback(result);
+    }
+  });
+
+  // Transfer Card to complete overload
+  socket.on('transfer_overload_card', ({ roomCode, cardIndex }, callback) => {
+    const code = roomCode.toUpperCase();
+    if (!rooms.has(code)) {
+      if (callback) callback({ success: false, error: 'Room not found' });
+      return;
+    }
+    const room = rooms.get(code);
+
+    const result = gameEngine.transferOverloadCard(room, socket.id, cardIndex);
+    sendGameStateToAll(code, room);
+
+    if (callback) {
+      callback(result);
+    }
+  });
+
+  // Initial Peek action (returns the card at the index)
+  socket.on('initial_peek', ({ roomCode, cardIndex }, callback) => {
+    const code = roomCode.toUpperCase();
+    if (!rooms.has(code)) {
+      if (callback) callback({ success: false });
+      return;
+    }
+    const room = rooms.get(code);
+    const player = room.players.find(p => p.id === socket.id);
+    if (!player || room.status !== 'initial_peeking') {
+      if (callback) callback({ success: false });
+      return;
+    }
+
+    // Check if indices are 2 or 3 (bottom two cards of 2x2 matrix)
+    if (cardIndex !== 2 && cardIndex !== 3) {
+      if (callback) callback({ success: false, error: 'Can only peek bottom two cards initially' });
+      return;
+    }
+
+    const card = player.cards[cardIndex];
+    if (callback) callback({ success: true, card });
+  });
+
+  // Done with initial peek phase
+  socket.on('done_peeking', ({ roomCode }) => {
+    const code = roomCode.toUpperCase();
+    if (!rooms.has(code)) return;
+    const room = rooms.get(code);
+
+    gameEngine.completeInitialPeek(room, socket.id);
+    sendGameStateToAll(code, room);
+  });
+
+  // Execute Card Action (Peek power, Spy power, Swap power)
+  socket.on('execute_action', ({ roomCode, actionData }, callback) => {
+    const code = roomCode.toUpperCase();
+    if (!rooms.has(code)) {
+      if (callback) callback({ success: false });
+      return;
+    }
+    const room = rooms.get(code);
+
+    const result = gameEngine.executeCardAction(room, socket.id, actionData);
+    
+    // Send updated game state to all
+    sendGameStateToAll(code, room);
+
+    if (callback) {
+      callback(result || { success: true });
+    }
+
+    // Check if game is over after actions or turns
+    checkAndHandleGameOver(room);
+  });
+
+  // Call CABO
+  socket.on('call_cabo', ({ roomCode }) => {
+    const code = roomCode.toUpperCase();
+    if (!rooms.has(code)) return;
+    const room = rooms.get(code);
+
+    gameEngine.callCabo(room, socket.id);
+    sendGameStateToAll(code, room);
+  });
+
+  // Start Next Round (called by host)
+  socket.on('next_round', ({ roomCode }) => {
+    const code = roomCode.toUpperCase();
+    if (!rooms.has(code)) return;
+    const room = rooms.get(code);
+
+    // Verify socket is host
+    const player = room.players.find(p => p.id === socket.id);
+    if (!player || !player.isHost) return;
+
+    const nextRoundState = gameEngine.initNextRound(room);
+    rooms.set(code, nextRoundState);
+    
+    // Broadcast game started to everyone in room
+    sendGameStateToAll(code, nextRoundState);
+  });
+
+  // Floating reaction emoji broadcast
+  socket.on('send_emoji', ({ roomCode, emoji }) => {
+    const code = roomCode.toUpperCase();
+    const mapping = socketToPlayerMap.get(socket.id);
+    if (!mapping) return;
+
+    io.to(code).emit('emoji_received', {
+      playerId: mapping.playerId,
+      emoji
+    });
+  });
+
+  // Disconnect handler
+  socket.on('disconnect', () => {
+    console.log(`Socket disconnected: ${socket.id}`);
+    const mapping = socketToPlayerMap.get(socket.id);
+    if (mapping) {
+      const { roomCode, playerId } = mapping;
+      if (rooms.has(roomCode)) {
+        const room = rooms.get(roomCode);
+        const player = room.players.find(p => p.playerId === playerId);
+        if (player) {
+          player.active = false;
+          io.to(roomCode).emit('room_updated', room.players);
+          io.to(roomCode).emit('log_message', `${player.name} disconnected. Waiting for reconnection...`);
+          console.log(`Player marked inactive: ${player.name} in Room ${roomCode}`);
+        }
+      }
+      socketToPlayerMap.delete(socket.id);
+    }
+  });
+});
+
+// Helper to check and write game over to DB
+function checkAndHandleGameOver(room) {
+  if (room.status === 'game_over') {
+    db.saveGameHistory({
+      roomCode: room.roomCode,
+      roundNumber: room.roundNumber,
+      players: room.players.map(p => ({
+        name: p.name,
+        playerId: p.playerId,
+        score: p.score
+      })),
+      winnerName: room.players.reduce((minP, p) => p.score < minP.score ? p : minP, room.players[0]).name
+    }).then(() => {
+      console.log(`Saved game result to database for room ${room.roomCode}`);
+    });
+  }
+}
+
+// Helper to send game state to all room players (sanitizing secret card info)
+function sendGameStateToAll(roomCode, room) {
+  checkAndHandleGameOver(room);
+  
+  // We send customized state to each socket depending on who they are
+  const sockets = io.sockets.adapter.rooms.get(roomCode);
+  if (!sockets) return;
+
+  for (const socketId of sockets) {
+    const socket = io.sockets.sockets.get(socketId);
+    if (socket) {
+      socket.emit('game_state_updated', sanitizeGameState(room, socketId));
+    }
+  }
+}
+
+// Sanitizes room state so clients don't see each other's card values
+function sanitizeGameState(room, socketId = null) {
+  const sanitizedPlayers = room.players.map(p => {
+    const isSelf = p.id === socketId;
+    return {
+      id: p.id,
+      playerId: p.playerId,
+      name: p.name,
+      isHost: p.isHost,
+      active: p.active,
+      score: p.score,
+      roundScore: p.roundScore,
+      peeked: p.peeked,
+      cards: p.cards.map((c, idx) => {
+        if (!c) return null; // Discarded slot
+        if (room.status === 'round_end' || room.status === 'game_over') {
+          return c;
+        }
+        // Auto-reveal bottom two cards to self during initial peeking
+        if (isSelf && room.status === 'initial_peeking' && (idx === 2 || idx === 3)) {
+          return c;
+        }
+        // Exposed card due to false overload (visible to all)
+        if (room.exposedCard && room.exposedCard.playerId === p.id && room.exposedCard.cardIndex === idx) {
+          return c;
+        }
+        return { id: c.id, hidden: true };
+      })
+    };
+  });
+
+  const activePlayer = room.players[room.turnIndex];
+  const isSelfDrawn = activePlayer && activePlayer.id === socketId;
+  let sanitizedDrawnCard = null;
+  if (room.activeDrawnCard) {
+    if (isSelfDrawn || room.status === 'round_end' || room.status === 'game_over') {
+      sanitizedDrawnCard = room.activeDrawnCard;
+    } else {
+      sanitizedDrawnCard = { id: room.activeDrawnCard.id, hidden: true };
+    }
+  }
+
+  return {
+    roomCode: room.roomCode,
+    status: room.status,
+    players: sanitizedPlayers,
+    deckCount: room.deck.length,
+    discardPile: room.discardPile,
+    topDiscard: room.discardPile[room.discardPile.length - 1] || null,
+    turnIndex: room.turnIndex,
+    caboPlayerId: room.caboPlayerId,
+    turnsLeft: room.turnsLeft,
+    activeDrawnCard: sanitizedDrawnCard,
+    drawnCardSource: room.drawnCardSource,
+    actionState: room.actionState,
+    roundNumber: room.roundNumber,
+    logs: room.logs,
+    overloadTransferState: room.overloadTransferState,
+    hasOverloadedCurrentDiscard: room.hasOverloadedCurrentDiscard,
+    exposedCard: room.exposedCard
+  };
+}
+
+// DB connection initialization
+db.connectDB().then(() => {
+  console.log('> Database status initialized.');
+});
+
+// Start Express Server
+server.listen(port, () => {
+  console.log(`> Standalone CABO Backend running on http://localhost:${port}`);
+  console.log(`> CORS configured to allow requests from origin: ${corsOrigin}`);
+});
