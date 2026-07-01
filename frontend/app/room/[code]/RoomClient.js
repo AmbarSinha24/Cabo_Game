@@ -869,7 +869,7 @@ export default function RoomClient({ code }) {
       <div className="w-full flex items-center justify-center gap-6 max-w-[1100px] mx-auto mt-2">
         
         {/* Left Panel: Actions & Info */}
-        <div className="glass p-3 rounded-2xl w-[190px] h-[215px] flex flex-col gap-1.5 shrink-0 border border-white/5 shadow-lg">
+        <div className="glass p-3 rounded-2xl w-[190px] h-[195px] flex flex-col gap-1.5 shrink-0 border border-white/5 shadow-lg">
           <span className="text-[0.7rem] uppercase text-gray-400 font-bold block mb-0.5 text-center tracking-wider border-b border-white/5 pb-1">
             Actions & Info
           </span>
@@ -1043,7 +1043,7 @@ export default function RoomClient({ code }) {
         <span className="text-[0.75rem] uppercase text-gray-400 font-bold block mb-1 text-center tracking-wider border-b border-white/5 pb-1.5">
           Game Log
         </span>
-        <div className="glass log-panel w-full max-h-[140px] overflow-y-auto rounded-xl p-3 font-mono text-xs leading-relaxed text-gray-400">
+        <div className="glass log-panel w-full max-h-[110px] overflow-y-auto rounded-xl p-3 font-mono text-xs leading-relaxed text-gray-400">
           {gameState.logs.slice().reverse().map((log, idx) => {
             let logClass = 'system';
             if (log.includes('called CABO')) logClass = 'cabo';
