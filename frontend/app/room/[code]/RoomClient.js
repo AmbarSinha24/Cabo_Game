@@ -113,9 +113,9 @@ export default function RoomClient({ code }) {
     socket.on('room_updated', (updatedPlayers) => {
       setPlayers(updatedPlayers);
       // Remove stale playerBoxRefs for players no longer in the room
-      const activeIds = new Set(updatedPlayers.map(p => p.id));
-      Object.keys(playerBoxRefs.current).forEach(id => {
-        if (!activeIds.has(id)) delete playerBoxRefs.current[id];
+      const activeIds = new Set(updatedPlayers.map(p => p.playerId));
+      Object.keys(playerBoxRefs.current).forEach(playerId => {
+        if (!activeIds.has(playerId)) delete playerBoxRefs.current[playerId];
       });
     });
 
@@ -857,7 +857,7 @@ export default function RoomClient({ code }) {
           return (
             <div
               key={opponent.id || opponent.playerId}
-              ref={el => { playerBoxRefs.current[opponent.id] = el; }}
+              ref={el => { playerBoxRefs.current[opponent.playerId] = el; }}
               className={`glass opponent-box ${isActive ? 'active' : ''}`}
               style={{ position: 'relative' }}
             >
@@ -1232,7 +1232,7 @@ export default function RoomClient({ code }) {
 
         {/* Center: Player Dashboard */}
         <div
-          ref={el => { if (selfPlayer) playerBoxRefs.current[selfPlayer.id] = el; }}
+          ref={el => { if (selfPlayer) playerBoxRefs.current[selfPlayer.playerId] = el; }}
           className="glass flex-1 max-w-[620px] rounded-3xl p-3 px-6 flex flex-col items-center justify-center border-t border-white/25 relative"
         >
 

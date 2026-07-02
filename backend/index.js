@@ -495,8 +495,10 @@ io.on('connection', (socket) => {
   // Floating reaction emoji broadcast
   socket.on('send_emoji', ({ roomCode, emoji }) => {
     const code = roomCode.toUpperCase();
+    const mapping = socketToPlayerMap.get(socket.id);
+    if (!mapping) return;
     io.to(code).emit('emoji_received', {
-      playerId: socket.id,
+      playerId: mapping.playerId,
       emoji
     });
   });
@@ -506,12 +508,15 @@ io.on('connection', (socket) => {
     const code = roomCode?.toUpperCase();
     if (!code) return;
 
+    const mapping = socketToPlayerMap.get(socket.id);
+    if (!mapping) return;
+
     const room = rooms.get(code);
-    const senderName = room ? (room.players.find(p => p.id === socket.id)?.name || 'Player') : 'Player';
+    const senderName = room ? (room.players.find(p => p.playerId === mapping.playerId)?.name || 'Player') : 'Player';
 
     // Broadcast chat bubble
     io.to(code).emit('chat_received', {
-      playerId: socket.id,
+      playerId: mapping.playerId,
       senderName,
       message
     });
