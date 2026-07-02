@@ -21,6 +21,7 @@ export default function RoomClient({ code }) {
   const [peekedIndices, setPeekedIndices] = useState([]);
   const [actionRevealCard, setActionRevealCard] = useState(null);
   const [actionRevealTitle, setActionRevealTitle] = useState('');
+  const [spiedOnNotification, setSpiedOnNotification] = useState(null);
   
   // Swap action local selections
   const [swapMyCardIndex, setSwapMyCardIndex] = useState(null);
@@ -119,6 +120,11 @@ export default function RoomClient({ code }) {
       floatingEmojisSetterRef.current(prev => [...prev, { id, playerId: senderId, emoji: message, left, isChat: true }]);
       const t = setTimeout(() => floatingEmojisSetterRef.current(prev => prev.filter(e => e.id !== id)), 3500);
       emojiTimersRef.current.push(t);
+    });
+
+    socket.on('you_were_spied_on', ({ spiedBy, cardIndex }) => {
+      console.log('CLIENT: you_were_spied_on', { spiedBy, cardIndex });
+      setSpiedOnNotification({ spiedBy, cardIndex });
     });
 
     socket.on('error_message', (msg) => {
@@ -273,7 +279,7 @@ export default function RoomClient({ code }) {
           }, (response) => {
             if (response.success) {
               const targetName = gameState.players.find(p => p.id === targetPlayerId)?.name || 'Opponent';
-              setActionRevealTitle(`Spying on ${targetName}'s Card`);
+              setActionRevealTitle(`Spying on ${targetName}'s Card (Card ${cardIndex + 1})`);
               setActionRevealCard(response.card);
             }
           });
@@ -1070,6 +1076,29 @@ export default function RoomClient({ code }) {
               className="button-glow w-full mt-6"
             >
               OK, End Turn
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* --- SPIED ON NOTIFICATION MODAL --- */}
+      {spiedOnNotification && (
+        <div className="flex items-center justify-center fixed top-0 left-0 w-screen h-screen bg-black/80 z-[2000]">
+          <div className="glass glass-heavy max-w-[340px] w-full flex flex-col items-center p-6 rounded-2xl border-rose-500/40 shadow-[0_0_20px_rgba(244,63,94,0.25)] text-center">
+            <div className="text-3xl mb-3">👁️</div>
+            <h3 className="text-lg font-extrabold mb-3 text-rose-400">
+              You Were Spied On!
+            </h3>
+            <p className="text-sm text-gray-300 mb-6 leading-relaxed">
+              <strong>{spiedOnNotification.spiedBy}</strong>{" just spied on your "}
+              <br />
+              <span className="text-cyan-400 font-extrabold text-base">Card {spiedOnNotification.cardIndex + 1}</span>.
+            </p>
+            <button 
+              onClick={() => setSpiedOnNotification(null)} 
+              className="button-glow w-full bg-gradient-to-br from-rose-500 to-violet-500 shadow-none text-xs"
+            >
+              Acknowledge
             </button>
           </div>
         </div>

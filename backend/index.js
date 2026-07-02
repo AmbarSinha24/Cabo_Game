@@ -353,6 +353,9 @@ io.on('connection', (socket) => {
     }
     const room = rooms.get(code);
 
+    const actionType = room.actionState.type;
+    const sourcePlayer = room.players.find(p => p.id === socket.id);
+
     const result = gameEngine.executeCardAction(room, socket.id, actionData);
     
     // Send updated game state to all
@@ -360,6 +363,15 @@ io.on('connection', (socket) => {
 
     if (callback) {
       callback(result || { success: true });
+    }
+
+    if (result && result.success && actionType === 'spy') {
+      const targetSocketId = actionData.targetPlayerId;
+      const cardIndex = actionData.cardIndex;
+      io.to(targetSocketId).emit('you_were_spied_on', {
+        spiedBy: sourcePlayer ? sourcePlayer.name : 'An opponent',
+        cardIndex: cardIndex
+      });
     }
 
     // Check if game is over after actions or turns
