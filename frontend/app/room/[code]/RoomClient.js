@@ -13,7 +13,12 @@ export default function RoomClient({ code }) {
   // Game states
   const [roomCode, setRoomCode] = useState(code);
   const [players, setPlayers] = useState([]);
-  const [isHost, setIsHost] = useState(false);
+  const [myPlayerId, setMyPlayerId] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('cabo_player_id');
+    }
+    return null;
+  });
   const [gameState, setGameState] = useState(null);
   
   // Local interaction states
@@ -97,7 +102,6 @@ export default function RoomClient({ code }) {
     socket.on('room_joined', ({ roomCode: joinedCode, players: initialPlayers, isHost: hostStatus, gameState: activeGame, lobbyTurnTimer: serverTimer }) => {
       setRoomCode(joinedCode);
       setPlayers(initialPlayers);
-      setIsHost(hostStatus);
       if (serverTimer) {
         setLobbyTurnTimer(serverTimer);
       }
@@ -410,6 +414,10 @@ export default function RoomClient({ code }) {
   };
 
   const getSelfPlayer = () => {
+    if (myPlayerId) {
+      return gameState?.players.find(p => p.playerId === myPlayerId) || 
+             players.find(p => p.playerId === myPlayerId);
+    }
     return gameState?.players.find(p => p.id === socketId) || 
            players.find(p => p.id === socketId);
   };
@@ -645,6 +653,9 @@ export default function RoomClient({ code }) {
     );
   };
 
+  const selfPlayer = getSelfPlayer();
+  const isHost = selfPlayer?.isHost || false;
+
   // --- LOBBY SCREEN ---
   if (!gameState || gameState.status === 'lobby') {
     return (
@@ -790,7 +801,6 @@ export default function RoomClient({ code }) {
   }
 
   // --- GAME BOARD SCREEN ---
-  const selfPlayer = getSelfPlayer();
   const opponents = getOpponents();
   const activePlayer = gameState.players[gameState.turnIndex];
   const isMyTurnActive = isMyTurn();
